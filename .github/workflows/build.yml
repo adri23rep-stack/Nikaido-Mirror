@@ -1,0 +1,78 @@
+name: Build Nikaido Mirror probes
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests -v
+  ios:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record and enforce SDK
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+          xcodebuild -version | head -1 | grep -E '^Xcode 27([.]|$)'
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          [[ "$SDK" == 27.* ]]
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          cd ios
+          xcodegen generate
+      - name: Build for device (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/NikaidoMirror.xcodeproj -scheme NikaidoMirror \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/ios CODE_SIGNING_ALLOWED=NO build | tee build-ios.log
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p build/package/Payload
+          cp -R build/ios/Build/Products/Release-iphoneos/NikaidoMirror.app build/package/Payload/
+          cd build/package
+          zip -qr ../NikaidoMirror-0.1.0-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NikaidoMirror-iOS-unsigned
+          path: build/NikaidoMirror-0.1.0-unsigned.ipa
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-build-log
+          path: build-ios.log
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - run: python -m unittest discover -s tests -v
+      - run: python -m pip install pyinstaller==6.16.0
+      - name: Build receiver EXE
+        run: python -m PyInstaller --clean --noconfirm --onefile --name NikaidoMirror windows/mirror.py
+      - name: Smoke test executable
+        run: .\dist\NikaidoMirror.exe --help
+      - name: Package instructions
+        run: |
+          Copy-Item README.md dist\README.md
+          Copy-Item docs\VALIDATION.md dist\VALIDATION.md
+          Copy-Item docs\DEPENDENCIES.md dist\DEPENDENCIES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NikaidoMirror-Windows-x64
+          path: dist/
+          if-no-files-found: error
