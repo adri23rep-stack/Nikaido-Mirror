@@ -2,6 +2,17 @@ import Foundation
 import CoreImage
 import VideoToolbox
 
+private final class FrameContext {
+    let sequence: UInt64
+    let capturedAt: UInt64
+    let startedAt: UInt64
+    let generation: UInt64
+    init(sequence: UInt64, capturedAt: UInt64, generation: UInt64) {
+        self.sequence = sequence; self.capturedAt = capturedAt
+        self.startedAt = Pipeline.micros(); self.generation = generation
+    }
+}
+
 final class Pipeline {
     var report: ((String) -> Void)?
     private let transport = Transport()
@@ -13,13 +24,10 @@ final class Pipeline {
     private var session: VTCompressionSession?
     private var size = CGSize.zero
     private var pool: CVPixelBufferPool?
-    private var sequence: UInt64 = 0
     private var captureCount: UInt64 = 0
-    private var acceptedAt: UInt64 = 0
     private var lastPTS = -Double.infinity
     private var forceKey = true
     private var generation: UInt64 = 0
-    private var startedAt: UInt64 = 0
     static func micros() -> UInt64 { UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000) }
     func start() {
         lock.lock(); running = true; lock.unlock()
@@ -47,6 +55,8 @@ final class Pipeline {
         lock.unlock()
         let receivedAt = Self.micros()
         queue.async {
+            self.lock.lock(); let running = self.running; self.lock.unlock()
+            guard running else { self.releaseGate(); return }
             let time = CMTimeGetSeconds(pts)
             guard time.isFinite else { self.releaseGate(); return }
             // Ceiling, not a promise that ScreenCaptureKit provides 60 FPS.
@@ -68,14 +78,15 @@ final class Pipeline {
                 guard let target else { throw self.error(-2) }
                 self.context.render(CIImage(cvPixelBuffer: pixel).transformed(by:
                     CGAffineTransform(scaleX: CGFloat(width) / CGFloat(w), y: CGFloat(height) / CGFloat(h))), to: target)
-                self.sequence = number
-                self.acceptedAt = receivedAt
-                self.startedAt = Self.micros()
+                let frame = FrameContext(sequence: number, capturedAt: receivedAt, generation: self.generation)
+                let handle = Unmanaged.passRetained(frame).toOpaque()
                 let properties = self.forceKey ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
                 self.forceKey = false
-                try self.check(VTCompressionSessionEncodeFrame(session, imageBuffer: target,
+                let result = VTCompressionSessionEncodeFrame(session, imageBuffer: target,
                     presentationTimeStamp: pts, duration: .invalid, frameProperties: properties,
-                    sourceFrameRefcon: nil, infoFlagsOut: nil))
+                    sourceFrameRefcon: handle, infoFlagsOut: nil)
+                if result != noErr { Unmanaged<FrameContext>.fromOpaque(handle).release() }
+                try self.check(result)
             } catch {
                 self.report?("Encoder: \(error)")
                 self.forceKey = true
@@ -92,10 +103,12 @@ final class Pipeline {
         try check(VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
             codecType: kCMVideoCodecType_H264, encoderSpecification: specification,
             imageBufferAttributes: nil, compressedDataAllocator: nil,
-            outputCallback: { ref, _, status, flags, buffer in
+            outputCallback: { ref, frameRef, status, flags, buffer in
+                guard let frameRef else { return }
+                let frame = Unmanaged<FrameContext>.fromOpaque(frameRef).takeRetainedValue()
                 guard let ref else { return }
                 let owner = Unmanaged<Pipeline>.fromOpaque(ref).takeUnretainedValue()
-                owner.queue.async { owner.encoded(buffer, status: status, flags: flags) }
+                owner.queue.async { owner.encoded(buffer, status: status, flags: flags, frame: frame) }
             }, refcon: Unmanaged.passUnretained(self).toOpaque(), compressionSessionOut: &session))
         guard let session else { throw error(-3) }
         for (key, value) in [
@@ -114,7 +127,8 @@ final class Pipeline {
         size = CGSize(width: width, height: height); forceKey = true
         report?("H.264 hardware · \(width)×\(height) · objetivo 60 FPS")
     }
-    private func encoded(_ buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags) {
+    private func encoded(_ buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags, frame: FrameContext) {
+        guard frame.generation == generation else { return }
         guard status == noErr, !flags.contains(.frameDropped), let buffer,
               let block = CMSampleBufferGetDataBuffer(buffer),
               let format = CMSampleBufferGetFormatDescription(buffer) else {
@@ -152,8 +166,8 @@ final class Pipeline {
         }
         guard offset == bytes.count, payload.count <= 8 * 1024 * 1024 else { forceKey = true; releaseGate(); return }
         var packet = Data("NM01".utf8)
-        packet.appendBE(UInt32(payload.count)); packet.appendBE(sequence)
-        packet.appendBE(acceptedAt); packet.appendBE(encodedAt - startedAt)
+        packet.appendBE(UInt32(payload.count)); packet.appendBE(frame.sequence)
+        packet.appendBE(frame.capturedAt); packet.appendBE(encodedAt - frame.startedAt)
         packet.append(payload)
         let currentGeneration = generation
         transport.send(packet) { ok in

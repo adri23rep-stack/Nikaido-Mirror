@@ -47,6 +47,7 @@ final class Capture: NSObject, ObservableObject, SCContentSharingPickerObserver,
             Task { @MainActor in
                 do {
                     try await self.stream?.stopCapture()
+                    guard self.generation == generation else { return }
                     let config = SCStreamConfiguration()
                     // Do not assume macOS-only pacing/queue properties work on iOS.
                     let next = SCStream(filter: filter, configuration: config, delegate: self)

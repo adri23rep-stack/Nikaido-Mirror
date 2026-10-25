@@ -37,6 +37,7 @@ final class Transport {
             guard incoming >= 0 else { return }
             self.lock.lock()
             guard self.client < 0 else { self.lock.unlock(); Darwin.close(incoming); return }
+            fcntl(incoming, F_SETFL, 0)
             self.client = incoming
             self.lock.unlock()
             var yes: Int32 = 1

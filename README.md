@@ -17,7 +17,7 @@ ni una promesa de 60 FPS.** Audio, controles remotos y 1080p no están incluidos
 - No se generó IPA ni EXE en este entorno Linux. Los workflows los generan al
   ejecutarse en GitHub; un YAML preparado no significa una compilación aprobada.
 - El repositorio remoto no pudo crearse: el conector no ofrece esa operación y
-  el navegador no tiene sesión. El ZIP conserva `.git` con commits locales.
+  el navegador no tiene sesión. El ZIP incluye `history.bundle` con commits locales.
 
 ## Prueba prevista
 
@@ -56,6 +56,21 @@ El ACK confirma escritura al pipe de mpv, no presentación en el monitor.
 
 [Prueba física y medición](docs/VALIDATION.md) · [Etapas](docs/ROADMAP.md) ·
 [Fuentes y decisiones](docs/RESEARCH.md) · [Protocolo](docs/PROTOCOL.md)
+
+## Subir a GitHub conservando commits
+
+Crear un repositorio vacío llamado `Nikaido-Mirror` (sin README inicial).
+Extraer el ZIP y, desde la carpeta que contiene history.bundle:
+
+```sh
+git clone history.bundle Nikaido-Mirror-git
+cd Nikaido-Mirror-git
+git remote set-url origin https://github.com/adri23rep-stack/Nikaido-Mirror.git
+git push -u origin main
+```
+
+Esto requiere iniciar sesión en GitHub desde tu equipo. También puedes dar el
+enlace del repositorio vacío a la siguiente sesión para continuar desde él.
 
 ## Desarrollo
 

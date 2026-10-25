@@ -74,6 +74,16 @@ def run(args):
                         with (logdir / f'mpv-{session}-{path.stem}.log').open('w', encoding='utf-8') as playerlog:
                             player = subprocess.Popen(player_args(mpv, not args.quality), stdin=subprocess.PIPE,
                                                       stdout=playerlog, stderr=subprocess.STDOUT, bufsize=0)
+                            progress = [time.monotonic()]
+                            finished = threading.Event()
+                            # A stalled decoder must not leave Python blocked writing forever.
+                            def watchdog(proc):
+                                while not finished.wait(1):
+                                    if time.monotonic() - progress[0] > 8:
+                                        print('Reproductor sin progreso durante 8 s; cerrando para recuperar USB.')
+                                        stop_process(proc)
+                                        return
+                            threading.Thread(target=watchdog, args=(player,), daemon=True).start()
                             # Close the socket promptly if the user closes mpv.
                             def watch(proc, connection):
                                 proc.wait()
@@ -94,6 +104,7 @@ def run(args):
                                     if not written:
                                         raise BrokenPipeError('mpv pipe closed')
                                     view = view[written:]
+                                    progress[0] = time.monotonic()
                                 sock.sendall(b'A')
                                 log.writerow([session, now, seq, source_us, enc_us, len(payload), gap])
                                 count += 1
@@ -110,6 +121,8 @@ def run(args):
                             print('mpv falló; revisa su registro. No se ocultará con reintentos.')
                         return
                 finally:
+                    if player is not None:
+                        finished.set()
                     stop_process(player)
                 time.sleep(1)
     finally:
