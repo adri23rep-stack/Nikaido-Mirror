@@ -51,6 +51,14 @@ class ProtocolTests(unittest.TestCase):
                 connection.sendall(b'A')
         thread.join(3); listener.close()
         self.assertFalse(thread.is_alive()); self.assertEqual(errors, [])
+    def test_mpv_fps_option_regression(self):
+        for gaming in (True, False):
+            self.assertFalse(any(arg.startswith('--fps=') for arg in player_args('mpv.exe', gaming)))
+        self.assertNotIn('--container-fps-override=60', player_args('mpv.exe', True))
+        quality = player_args('mpv.exe', False)
+        self.assertIn('--correct-pts=no', quality)
+        self.assertIn('--container-fps-override=60', quality)
+
     def test_gaming_arguments(self):
         command = player_args('mpv.exe', True)
         self.assertIn('--hwdec=d3d11va', command)

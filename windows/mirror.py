@@ -23,11 +23,13 @@ def tool(name):
 def player_args(mpv, gaming):
     result = [mpv, '--no-config', '--title=Nikaido Mirror · USB', '--hwdec=d3d11va',
               '--vo=gpu', '--gpu-api=d3d11', '--demuxer-lavf-format=h264',
-              '--demuxer-lavf-o=probesize=32,analyzeduration=0', '--fps=60',
+              '--demuxer-lavf-o=probesize=32,analyzeduration=0',
               '--cache=no', '--audio=no', '--keep-open=no', '--input-terminal=no',
               '--input-default-bindings=yes', '--osd-level=1']
     if gaming:
         result += ['--profile=low-latency', '--untimed', '--vd-lavc-threads=1']
+    else:
+        result += ['--correct-pts=no', '--container-fps-override=60']
     return result + ['-']
 
 def stop_process(process):
@@ -41,7 +43,7 @@ def stop_process(process):
 def run(args):
     iproxy, mpv = tool('iproxy'), tool('mpv')
     proxy = None
-    print('Nikaido Mirror 0.1 · USB solamente · audio pendiente')
+    print('Nikaido Mirror 0.1.1 · USB solamente · audio pendiente')
     print('F: pantalla completa | I: estadísticas mpv | Q: salir del reproductor')
     print('FPS RX = recibidos, NO presentados. Retraso total: pendiente de medición óptica.')
     logdir = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'NikaidoMirror' / 'logs'
