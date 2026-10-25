@@ -7,7 +7,7 @@ final class Transport {
     private var listener: Int32 = -1
     private var client: Int32 = -1
     private var source: DispatchSourceRead?
-    private let queue = DispatchQueue(label: "mirror.usb")
+    private let queue = DispatchQueue(label: "mirror.usb", qos: .userInteractive)
     private let lock = NSLock()
     var connected: Bool { lock.lock(); defer { lock.unlock() }; return client >= 0 }
     var report: ((String) -> Void)?

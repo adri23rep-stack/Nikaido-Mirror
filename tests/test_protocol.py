@@ -4,7 +4,7 @@ import sys
 import threading
 import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'windows'))
-from protocol import HEADER, MAX_PAYLOAD, read_exact, read_frame
+from protocol import HEADER, MAX_PAYLOAD, read_exact, read_frame, read_frame_details, DIAGNOSTICS, DIAGNOSTIC_FIELDS
 from mirror import player_args
 
 class Fragmented:
@@ -16,6 +16,23 @@ class Fragmented:
 class ProtocolTests(unittest.TestCase):
     def packet(self, payload=b'\x00\x00\x00\x01\x65abc', seq=42):
         return HEADER.pack(b'NM01', len(payload), seq, 1000000, 2345) + payload
+    def test_nm02_fragmentation_and_order(self):
+        payload = b'\0\0\0\1\x65abc'
+        timing = (120, 3500, 22, 4000, 12000, 2, 1)
+        packet = HEADER.pack(b'NM02', len(payload), 42, 1000000, 8000) + DIAGNOSTICS.pack(*timing) + payload
+        result = read_frame_details(Fragmented(packet, 3))
+        self.assertEqual(result[:4], (42, 1000000, 8000, payload))
+        self.assertEqual(result[4], dict(zip(DIAGNOSTIC_FIELDS, timing)))
+        self.assertEqual(read_frame(Fragmented(packet)), result[:4])
+        sock = Fragmented(packet + self.packet(seq=43), 11)
+        self.assertEqual(read_frame_details(sock), result)
+        self.assertEqual(read_frame_details(sock)[4], {})
+    def test_nm02_truncated_diagnostics(self):
+        packet = HEADER.pack(b'NM02', 10, 1, 2, 3) + bytes(DIAGNOSTICS.size - 1)
+        with self.assertRaises(EOFError): read_frame_details(Fragmented(packet))
+    def test_nm02_rejects_length_before_diagnostics(self):
+        with self.assertRaises(ValueError):
+            read_frame_details(Fragmented(HEADER.pack(b'NM02', MAX_PAYLOAD + 1, 0, 0, 0)))
     def test_fragmentation(self):
         self.assertEqual(read_frame(Fragmented(self.packet())), (42, 1000000, 2345, b'\0\0\0\1\x65abc'))
     def test_consecutive_frames(self):

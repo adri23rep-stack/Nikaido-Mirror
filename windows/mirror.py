@@ -9,7 +9,7 @@ import subprocess
 import sys
 import threading
 import time
-from protocol import read_frame
+from protocol import read_frame_details, DIAGNOSTIC_FIELDS
 
 ROOT = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).resolve().parent
 
@@ -43,7 +43,7 @@ def stop_process(process):
 def run(args):
     iproxy, mpv = tool('iproxy'), tool('mpv')
     proxy = None
-    print('Nikaido Mirror 0.1.1 · USB solamente · audio pendiente')
+    print('Nikaido Mirror 0.1.3 · USB solamente · audio pendiente')
     print('F: pantalla completa | I: estadísticas mpv | Q: salir del reproductor')
     print('FPS RX = recibidos, NO presentados. Retraso total: pendiente de medición óptica.')
     logdir = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'NikaidoMirror' / 'logs'
@@ -54,7 +54,7 @@ def run(args):
         with path.open('w', newline='', encoding='utf-8') as output:
             log = csv.writer(output)
             log.writerow(['session', 'host_rx_monotonic_ns', 'source_sequence', 'source_capture_us',
-                          'encoder_us', 'bytes', 'source_frames_skipped'])
+                          'encoder_us', 'bytes', 'source_frames_skipped', *DIAGNOSTIC_FIELDS])
             session = 0
             while True:
                 if proxy is None or proxy.poll() is not None:
@@ -70,9 +70,10 @@ def run(args):
                         session += 1
                         last = None
                         count = skipped = 0
+                        maxima = {}
                         start = time.monotonic()
                         # First complete frame validates USB before opening a player.
-                        frame = read_frame(sock)
+                        frame = read_frame_details(sock)
                         with (logdir / f'mpv-{session}-{path.stem}.log').open('w', encoding='utf-8') as playerlog:
                             player = subprocess.Popen(player_args(mpv, not args.quality), stdin=subprocess.PIPE,
                                                       stdout=playerlog, stderr=subprocess.STDOUT, bufsize=0)
@@ -95,7 +96,10 @@ def run(args):
                                     pass
                             threading.Thread(target=watch, args=(player, sock), daemon=True).start()
                             while True:
-                                seq, source_us, enc_us, payload = frame
+                                seq, source_us, enc_us, payload, details = frame
+                                for key, value in {"encoder_us": enc_us, **details}.items():
+                                    if key.endswith("_us"):
+                                        maxima[key] = max(maxima.get(key, 0), value)
                                 now = time.monotonic_ns()
                                 gap = max(0, seq - last - 1) if last is not None else 0
                                 last = seq
@@ -108,14 +112,24 @@ def run(args):
                                     view = view[written:]
                                     progress[0] = time.monotonic()
                                 sock.sendall(b'A')
-                                log.writerow([session, now, seq, source_us, enc_us, len(payload), gap])
+                                log.writerow([session, now, seq, source_us, enc_us, len(payload), gap,
+                                              *(details.get(key, "") for key in DIAGNOSTIC_FIELDS)])
                                 count += 1
                                 elapsed = time.monotonic() - start
                                 if elapsed >= 1:
-                                    print(f'FPS RX {count / elapsed:.1f} | encoder {enc_us / 1000:.1f} ms | '
+                                    print(f'FPS RX {count / elapsed:.1f} | encoder máx {maxima["encoder_us"] / 1000:.1f} ms | '
                                           f'omitidos origen {skipped} | retraso total: sin medir')
-                                    output.flush(); count = 0; start = time.monotonic()
-                                frame = read_frame(sock)
+                                    if details:
+                                        state = {0: 'app', 1: 'inactiva/barra', 2: 'fondo'}.get(details['app_state'], '?')
+                                        thermal = {0: 'normal', 1: 'moderado', 2: 'alto', 3: 'crítico'}.get(details['thermal_state'], '?')
+                                        print(f'  {state} | térmico {thermal} | máximos ventana ms: '
+                                              f'cola {maxima["queue_us"]/1000:.1f} · '
+                                              f'imagen {maxima["prepare_us"]/1000:.1f} · '
+                                              f'callback {maxima["callback_queue_us"]/1000:.1f} · '
+                                              f'USB+ACK previo {maxima["previous_ack_us"]/1000:.1f} · '
+                                              f'trabajo iPhone {maxima["source_work_us"]/1000:.1f}')
+                                    output.flush(); count = 0; maxima.clear(); start = time.monotonic()
+                                frame = read_frame_details(sock)
                 except (OSError, EOFError, ValueError) as error:
                     print(f'Esperando iPhone / reconexión: {error}')
                     if player is not None and player.poll() is not None:

@@ -17,8 +17,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: Nikaido Mirror
-        CFBundleShortVersionString: '0.1.2'
-        CFBundleVersion: '2'
+        CFBundleShortVersionString: '0.1.3'
+        CFBundleVersion: '3'
         UILaunchScreen: {}
         UIBackgroundModes: [screen-capture]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]

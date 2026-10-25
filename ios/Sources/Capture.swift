@@ -6,7 +6,7 @@ final class Capture: NSObject, ObservableObject, SCContentSharingPickerObserver,
     @Published var status = "Conecta el cable y abre el receptor de Windows."
     @Published var active = false
     private var stream: SCStream?
-    private let queue = DispatchQueue(label: "mirror.capture")
+    private let queue = DispatchQueue(label: "mirror.capture", qos: .userInteractive)
     private let pipeline = Pipeline()
     private var generation = 0
 
@@ -22,6 +22,7 @@ final class Capture: NSObject, ObservableObject, SCContentSharingPickerObserver,
             DispatchQueue.main.async { self?.status = text }
         }
     }
+    func setActivity(_ value: UInt64) { pipeline.setActivity(value) }
     func start() {
         active = true
         let picker = SCContentSharingPicker.shared
@@ -55,7 +56,9 @@ final class Capture: NSObject, ObservableObject, SCContentSharingPickerObserver,
                     try await self.stream?.stopCapture()
                     guard self.generation == generation else { return }
                     let config = SCStreamConfiguration()
-                    // Do not assume macOS-only pacing/queue properties work on iOS.
+                    // iOS 27 API: request at most 60 FPS and the documented minimum queue depth.
+                    config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+                    config.queueDepth = 3
                     let next = SCStream(filter: filter, configuration: config, delegate: self)
                     try next.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
                     self.stream = next

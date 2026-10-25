@@ -7,9 +7,14 @@ private final class FrameContext {
     let capturedAt: UInt64
     let startedAt: UInt64
     let generation: UInt64
-    init(sequence: UInt64, capturedAt: UInt64, generation: UInt64) {
+    let queuedUs: UInt64
+    let preparedUs: UInt64
+    let activity: UInt64
+    init(sequence: UInt64, capturedAt: UInt64, generation: UInt64,
+         queuedUs: UInt64, preparedUs: UInt64, activity: UInt64) {
         self.sequence = sequence; self.capturedAt = capturedAt
         self.startedAt = Pipeline.micros(); self.generation = generation
+        self.queuedUs = queuedUs; self.preparedUs = preparedUs; self.activity = activity
     }
 }
 
@@ -19,10 +24,13 @@ final class Pipeline {
     private var recovery = EncoderRecovery()
     private let transport = Transport()
     private let context = CIContext(options: [.cacheIntermediates: false])
-    private let queue = DispatchQueue(label: "mirror.encode")
+    private let queue = DispatchQueue(label: "mirror.encode", qos: .userInteractive)
     private let lock = NSLock()
     private var busy = false
     private var running = false
+    private var activity: UInt64 = 0
+    private var previousAckUs: UInt64 = 0
+    func setActivity(_ value: UInt64) { lock.lock(); activity = value; lock.unlock() }
     private var session: VTCompressionSession?
     private var size = CGSize.zero
     private var pool: CVPixelBufferPool?
@@ -32,7 +40,7 @@ final class Pipeline {
     private var generation: UInt64 = 0
     static func micros() -> UInt64 { UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000) }
     func start() {
-        queue.async { self.recovery = EncoderRecovery() }
+        queue.async { self.recovery = EncoderRecovery(); self.previousAckUs = 0 }
         lock.lock(); running = true; lock.unlock()
         transport.report = { [weak self] in self?.report?($0) }
         do { try transport.start() } catch { report?("Puerto USB: \(error)") }
@@ -69,11 +77,13 @@ final class Pipeline {
         lock.lock()
         captureCount &+= 1
         let number = captureCount
+        let currentActivity = activity
         guard running, !busy, transport.connected else { lock.unlock(); return }
         busy = true
         lock.unlock()
         let receivedAt = Self.micros()
         queue.async {
+            let processingAt = Self.micros()
             self.lock.lock(); let running = self.running; self.lock.unlock()
             guard running else { self.releaseGate(); return }
             guard self.recovery.ready(now: ProcessInfo.processInfo.systemUptime) else {
@@ -102,7 +112,9 @@ final class Pipeline {
                 guard let target else { throw self.error(-2) }
                 self.context.render(CIImage(cvPixelBuffer: pixel).transformed(by:
                     CGAffineTransform(scaleX: CGFloat(width) / CGFloat(w), y: CGFloat(height) / CGFloat(h))), to: target)
-                let frame = FrameContext(sequence: number, capturedAt: receivedAt, generation: self.generation)
+                let frame = FrameContext(sequence: number, capturedAt: receivedAt, generation: self.generation,
+                    queuedUs: processingAt - receivedAt, preparedUs: Self.micros() - processingAt,
+                    activity: currentActivity)
                 let handle = Unmanaged.passRetained(frame).toOpaque()
                 let properties = self.forceKey ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
                 self.forceKey = false
@@ -121,35 +133,62 @@ final class Pipeline {
     private func error(_ code: OSStatus) -> NSError { NSError(domain: "Nikaido.VideoToolbox", code: Int(code)) }
     private func configure(width: Int, height: Int) throws {
         resetEncoder()
-        let specification = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
-        try check(VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264, encoderSpecification: specification,
-            imageBufferAttributes: nil, compressedDataAllocator: nil,
-            outputCallback: { ref, frameRef, status, flags, buffer in
-                guard let frameRef else { return }
-                let frame = Unmanaged<FrameContext>.fromOpaque(frameRef).takeRetainedValue()
-                guard let ref else { return }
-                let owner = Unmanaged<Pipeline>.fromOpaque(ref).takeUnretainedValue()
-                owner.queue.async { owner.encoded(buffer, status: status, flags: flags, frame: frame) }
-            }, refcon: Unmanaged.passUnretained(self).toOpaque(), compressionSessionOut: &session))
+        let callback: VTCompressionOutputCallback = { ref, frameRef, status, flags, buffer in
+            let callbackAt = Pipeline.micros()
+            guard let frameRef else { return }
+            let frame = Unmanaged<FrameContext>.fromOpaque(frameRef).takeRetainedValue()
+            guard let ref else { return }
+            let owner = Unmanaged<Pipeline>.fromOpaque(ref).takeUnretainedValue()
+            owner.queue.async {
+                owner.encoded(buffer, status: status, flags: flags, frame: frame, callbackAt: callbackAt)
+            }
+        }
+        func create(lowLatency: Bool) -> OSStatus {
+            var specification: [CFString: Any] = [
+                kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true
+            ]
+            if lowLatency { specification[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true }
+            return VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
+                codecType: kCMVideoCodecType_H264, encoderSpecification: specification as CFDictionary,
+                imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: callback,
+                refcon: Unmanaged.passUnretained(self).toOpaque(), compressionSessionOut: &session)
+        }
+        var lowLatency = true
+        var result = create(lowLatency: true)
+        if result != noErr {
+            // Older/unsupported encoders retain the existing hardware path, never software fallback.
+            print("Low latency encoder unavailable: \(result); trying standard hardware encoder")
+            if let session { VTCompressionSessionInvalidate(session) }
+            session = nil
+            lowLatency = false
+            result = create(lowLatency: false)
+        }
+        try check(result)
         guard let session else { throw error(-3) }
         for (key, value) in [
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef),
             (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef),
-            (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Baseline_AutoLevel as CFTypeRef),
+            (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef),
             (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 8_000_000)),
-            (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: 60)),
-            (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: 60))
+            (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: 60))
         ] { try check(VTSessionSetProperty(session, key: key, value: value)) }
+        // Optional speed hints must not break devices that reject them.
+        let speedStatus = VTSessionSetProperty(session,
+            key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
+        if speedStatus != noErr { print("Encoding speed hint unsupported: \(speedStatus)") }
+        if !lowLatency {
+            try check(VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                                          value: NSNumber(value: 60)))
+        }
         try check(VTCompressionSessionPrepareToEncodeFrames(session))
         let attributes: [CFString: Any] = [kCVPixelBufferWidthKey: width, kCVPixelBufferHeightKey: height,
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
             kCVPixelBufferIOSurfacePropertiesKey: [:]]
         try check(CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool))
         size = CGSize(width: width, height: height); forceKey = true
-        report?("H.264 hardware · \(width)×\(height) · objetivo 60 FPS")
+        report?("H.264 hardware · \(width)×\(height) · \(lowLatency ? "baja latencia" : "modo compatible")")
     }
-    private func encoded(_ buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags, frame: FrameContext) {
+    private func encoded(_ buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags, frame: FrameContext, callbackAt: UInt64) {
         guard frame.generation == generation else { return }
         guard status == noErr else {
             encoderFailed(error(status), stage: "callback"); return
@@ -190,14 +229,21 @@ final class Pipeline {
             payload.append(contentsOf: [0, 0, 0, 1]); payload.append(bytes[offset..<offset+length]); offset += length
         }
         guard offset == bytes.count, payload.count <= 8 * 1024 * 1024 else { forceKey = true; releaseGate(); return }
-        var packet = Data("NM01".utf8)
+        var packet = Data("NM02".utf8)
         packet.appendBE(UInt32(payload.count)); packet.appendBE(frame.sequence)
-        packet.appendBE(frame.capturedAt); packet.appendBE(encodedAt - frame.startedAt)
+        packet.appendBE(frame.capturedAt); packet.appendBE(callbackAt - frame.startedAt)
+        packet.appendBE(frame.queuedUs); packet.appendBE(frame.preparedUs)
+        packet.appendBE(encodedAt - callbackAt); packet.appendBE(previousAckUs)
+        packet.appendBE(encodedAt - frame.capturedAt); packet.appendBE(frame.activity)
+        packet.appendBE(UInt64(ProcessInfo.processInfo.thermalState.rawValue))
         packet.append(payload)
         let currentGeneration = generation
+        let sendingAt = Self.micros()
         transport.send(packet) { ok in
+            let acknowledgedAt = Self.micros()
             self.queue.async {
                 guard currentGeneration == self.generation else { return }
+                self.previousAckUs = acknowledgedAt - sendingAt
                 if !ok { self.forceKey = true }
                 self.releaseGate()
             }
