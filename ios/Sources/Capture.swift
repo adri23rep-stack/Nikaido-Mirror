@@ -56,9 +56,8 @@ final class Capture: NSObject, ObservableObject, SCContentSharingPickerObserver,
                     try await self.stream?.stopCapture()
                     guard self.generation == generation else { return }
                     let config = SCStreamConfiguration()
-                    // iOS 27 API: request at most 60 FPS and the documented minimum queue depth.
-                    config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-                    config.queueDepth = 3
+                    // SDK 27.1 marks minimumFrameInterval and queueDepth unavailable on iOS.
+                    // Keep system defaults; the pipeline limits admitted encoding to 60 FPS.
                     let next = SCStream(filter: filter, configuration: config, delegate: self)
                     try next.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue)
                     self.stream = next

@@ -22,7 +22,7 @@ jobs:
         run: |
           xcodebuild -version
           xcodebuild -showsdks
-          xcodebuild -version | head -1 | grep -E '^Xcode 27([.]|$)'
+          xcodebuild -version | grep -E '^Xcode 27([.]|$)'
           SDK=$(xcrun --sdk iphoneos --show-sdk-version)
           [[ "$SDK" == 27.* ]]
       - name: Test encoder recovery policy

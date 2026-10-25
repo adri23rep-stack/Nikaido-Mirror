@@ -14,8 +14,10 @@ load, conversion or transport as the root cause.
 
 - Capture, encoding and USB queues request userInteractive QoS. This is a
   scheduling request, not a guarantee of background execution priority.
-- ScreenCaptureKit requests a 1/60 second minimum interval and queue depth 3
-  (documented minimum). Resolution still fits within 1280×720, aspect preserved.
+- Keep ScreenCaptureKit defaults and the existing 60 FPS admission ceiling.
+  Resolution still fits within 1280×720, aspect preserved. The actual Xcode 27.1
+  SDK rejects minimumFrameInterval and queueDepth on iOS despite the web pages
+  listing iOS availability. This was verified by CI; neither property is used.
 - Request VideoToolbox low-latency rate control at session creation, with High
   profile, no B frames, real-time compression and optional speed-over-quality.
   The low-latency mode requires High, so the previous Baseline setting is removed.

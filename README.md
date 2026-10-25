@@ -16,7 +16,7 @@ acepta las IPA antiguas, pero el EXE antiguo no acepta el protocolo NM02 nuevo.
 Mantener iproxy, mpv y controladores existentes. Ver [diagnóstico y prueba](docs/BACKGROUND.md).
 No se considera corregida la lentitud hasta probar esta versión en el iPhone.
 
-## Estado exacto de esta entrega
+## Historial de la primera entrega 0.1.0
 
 - Documentación oficial comprobada: ScreenCaptureKit iOS 27, captura completa,
   modo de fondo `screen-capture`, runner `xcode-27`, forwarding de iproxy.
