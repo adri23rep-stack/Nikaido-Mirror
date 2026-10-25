@@ -25,6 +25,11 @@ jobs:
           xcodebuild -version | head -1 | grep -E '^Xcode 27([.]|$)'
           SDK=$(xcrun --sdk iphoneos --show-sdk-version)
           [[ "$SDK" == 27.* ]]
+      - name: Test encoder recovery policy
+        run: |
+          mkdir -p build
+          swiftc ios/Sources/EncoderRecovery.swift tests/encoder_recovery/main.swift -o build/test-recovery
+          build/test-recovery
       - name: Generate Xcode project
         run: |
           brew install xcodegen
@@ -41,11 +46,11 @@ jobs:
           mkdir -p build/package/Payload
           cp -R build/ios/Build/Products/Release-iphoneos/NikaidoMirror.app build/package/Payload/
           cd build/package
-          zip -qr ../NikaidoMirror-0.1.0-unsigned.ipa Payload
+          zip -qr ../NikaidoMirror-0.1.2-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
           name: NikaidoMirror-iOS-unsigned
-          path: build/NikaidoMirror-0.1.0-unsigned.ipa
+          path: build/NikaidoMirror-0.1.2-unsigned.ipa
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()

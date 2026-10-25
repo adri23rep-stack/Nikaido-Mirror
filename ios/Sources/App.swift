@@ -7,7 +7,7 @@ struct MirrorApp: App {
         WindowGroup {
             VStack(spacing: 24) {
                 Text("Nikaido Mirror").font(.largeTitle.bold())
-                Text("USB · prueba 0.1").foregroundStyle(.secondary)
+                Text("USB · prueba 0.1.2").foregroundStyle(.secondary)
                 Text(capture.status).multilineTextAlignment(.center)
                 Button("Compartir pantalla completa") { capture.start() }
                     .buttonStyle(.borderedProminent).disabled(capture.active)

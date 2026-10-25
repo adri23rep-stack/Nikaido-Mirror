@@ -12,6 +12,12 @@ final class Capture: NSObject, ObservableObject, SCContentSharingPickerObserver,
 
     override init() {
         super.init()
+        pipeline.failed = { [weak self] text in
+            DispatchQueue.main.async {
+                self?.stop()
+                self?.status = text
+            }
+        }
         pipeline.report = { [weak self] text in
             DispatchQueue.main.async { self?.status = text }
         }

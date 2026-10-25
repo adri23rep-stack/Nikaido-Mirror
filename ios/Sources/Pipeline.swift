@@ -15,6 +15,8 @@ private final class FrameContext {
 
 final class Pipeline {
     var report: ((String) -> Void)?
+    var failed: ((String) -> Void)?
+    private var recovery = EncoderRecovery()
     private let transport = Transport()
     private let context = CIContext(options: [.cacheIntermediates: false])
     private let queue = DispatchQueue(label: "mirror.encode")
@@ -30,6 +32,7 @@ final class Pipeline {
     private var generation: UInt64 = 0
     static func micros() -> UInt64 { UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000) }
     func start() {
+        queue.async { self.recovery = EncoderRecovery() }
         lock.lock(); running = true; lock.unlock()
         transport.report = { [weak self] in self?.report?($0) }
         do { try transport.start() } catch { report?("Puerto USB: \(error)") }
@@ -38,12 +41,28 @@ final class Pipeline {
         lock.lock(); running = false; lock.unlock()
         transport.stop()
         queue.async {
-            self.generation &+= 1
-            if let session = self.session { VTCompressionSessionInvalidate(session) }
-            self.session = nil; self.pool = nil; self.size = .zero
-            self.forceKey = true; self.lastPTS = -.infinity
+            self.resetEncoder()
             self.releaseGate()
         }
+    }
+    // Only called on the encoding queue; stale callbacks cannot release a new frame's gate.
+    private func resetEncoder() {
+        generation &+= 1
+        if let session { VTCompressionSessionInvalidate(session) }
+        session = nil; pool = nil; size = .zero
+        forceKey = true; lastPTS = -.infinity
+    }
+    private func encoderFailed(_ error: Error, stage: String) {
+        let code = (error as NSError).code
+        resetEncoder()
+        let retry = recovery.retry(now: ProcessInfo.processInfo.systemUptime)
+        if retry {
+            report?("Encoder \(stage): \(code) · recuperando sesión (\(recovery.attempts)/3)")
+        } else {
+            lock.lock(); running = false; lock.unlock()
+            failed?("Encoder \(stage): \(code) · recuperación agotada. Pulsa Compartir para reintentar.")
+        }
+        releaseGate()
     }
     private func releaseGate() { lock.lock(); busy = false; lock.unlock() }
     func accept(_ pixel: CVPixelBuffer, pts: CMTime) {
@@ -57,6 +76,10 @@ final class Pipeline {
         queue.async {
             self.lock.lock(); let running = self.running; self.lock.unlock()
             guard running else { self.releaseGate(); return }
+            guard self.recovery.ready(now: ProcessInfo.processInfo.systemUptime) else {
+                self.releaseGate(); return
+            }
+            var stage = "configuración"
             let time = CMTimeGetSeconds(pts)
             guard time.isFinite else { self.releaseGate(); return }
             // Ceiling, not a promise that ScreenCaptureKit provides 60 FPS.
@@ -73,6 +96,7 @@ final class Pipeline {
                     try self.configure(width: width, height: height)
                 }
                 guard let session = self.session, let pool = self.pool else { throw self.error(-1) }
+                stage = "preparación de imagen"
                 var target: CVPixelBuffer?
                 try self.check(CVPixelBufferPoolCreatePixelBuffer(nil, pool, &target))
                 guard let target else { throw self.error(-2) }
@@ -82,23 +106,21 @@ final class Pipeline {
                 let handle = Unmanaged.passRetained(frame).toOpaque()
                 let properties = self.forceKey ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
                 self.forceKey = false
+                stage = "codificación"
                 let result = VTCompressionSessionEncodeFrame(session, imageBuffer: target,
                     presentationTimeStamp: pts, duration: .invalid, frameProperties: properties,
                     sourceFrameRefcon: handle, infoFlagsOut: nil)
                 if result != noErr { Unmanaged<FrameContext>.fromOpaque(handle).release() }
                 try self.check(result)
             } catch {
-                self.report?("Encoder: \(error)")
-                self.forceKey = true
-                self.releaseGate()
+                self.encoderFailed(error, stage: stage)
             }
         }
     }
     private func check(_ code: OSStatus) throws { if code != noErr { throw error(code) } }
     private func error(_ code: OSStatus) -> NSError { NSError(domain: "Nikaido.VideoToolbox", code: Int(code)) }
     private func configure(width: Int, height: Int) throws {
-        if let session { VTCompressionSessionInvalidate(session) }
-        session = nil; pool = nil; size = .zero
+        resetEncoder()
         let specification = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
         try check(VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
             codecType: kCMVideoCodecType_H264, encoderSpecification: specification,
@@ -129,7 +151,10 @@ final class Pipeline {
     }
     private func encoded(_ buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags, frame: FrameContext) {
         guard frame.generation == generation else { return }
-        guard status == noErr, !flags.contains(.frameDropped), let buffer,
+        guard status == noErr else {
+            encoderFailed(error(status), stage: "callback"); return
+        }
+        guard !flags.contains(.frameDropped), let buffer,
               let block = CMSampleBufferGetDataBuffer(buffer),
               let format = CMSampleBufferGetFormatDescription(buffer) else {
             forceKey = true; releaseGate(); return
