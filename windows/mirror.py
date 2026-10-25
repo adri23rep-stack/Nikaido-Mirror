@@ -7,9 +7,9 @@ import shutil
 import socket
 import subprocess
 import sys
-import threading
 import time
 from protocol import read_frame_details, DIAGNOSTIC_FIELDS
+from player import PersistentPlayer, PlayerClosed, stop_process
 
 ROOT = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).resolve().parent
 
@@ -32,24 +32,33 @@ def player_args(mpv, gaming):
         result += ['--correct-pts=no', '--container-fps-override=60']
     return result + ['-']
 
-def stop_process(process):
-    if process and process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill(); process.wait()
+def receive_frame(sock, player, clock=time.monotonic, notify=print):
+    started = clock()
+    announced = False
+    def idle():
+        nonlocal announced
+        player.check()
+        if not announced:
+            notify('Sin vídeo del iPhone; manteniendo la ventana abierta...')
+            announced = True
+        if clock() - started >= 30:
+            raise TimeoutError('30 s sin un fotograma completo; reconectando USB')
+    # read_exact retains partial headers/payloads across socket idle timeouts.
+    return read_frame_details(sock, on_idle=idle)
+
 
 def run(args):
     iproxy, mpv = tool('iproxy'), tool('mpv')
     proxy = None
-    print('Nikaido Mirror 0.1.3 · USB solamente · audio pendiente')
+    print('Nikaido Mirror 0.1.4 · USB solamente · audio pendiente')
     print('F: pantalla completa | I: estadísticas mpv | Q: salir del reproductor')
     print('FPS RX = recibidos, NO presentados. Retraso total: pendiente de medición óptica.')
     logdir = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'NikaidoMirror' / 'logs'
     logdir.mkdir(parents=True, exist_ok=True)
     path = logdir / (time.strftime('%Y%m%d-%H%M%S') + '.csv')
     print('Registro:', path)
+    player = PersistentPlayer(player_args(mpv, not args.quality), logdir / f'mpv-{path.stem}.log')
+    decoder_restarts = 0
     try:
         with path.open('w', newline='', encoding='utf-8') as output:
             log = csv.writer(output)
@@ -57,91 +66,75 @@ def run(args):
                           'encoder_us', 'bytes', 'source_frames_skipped', *DIAGNOSTIC_FIELDS])
             session = 0
             while True:
+                try:
+                    player.check()
+                except PlayerClosed as error:
+                    print(error); return
                 if proxy is None or proxy.poll() is not None:
                     command = [iproxy, '-l', '-s', '127.0.0.1']
                     if args.udid:
                         command += ['-u', args.udid]
                     proxy = subprocess.Popen(command + ['27183:27183'])
-                player = None
                 try:
                     with socket.create_connection(('127.0.0.1', 27183), timeout=3) as sock:
                         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        sock.settimeout(5)
+                        sock.settimeout(1)
                         session += 1
                         last = None
                         count = skipped = 0
                         maxima = {}
                         start = time.monotonic()
-                        # First complete frame validates USB before opening a player.
-                        frame = read_frame_details(sock)
-                        with (logdir / f'mpv-{session}-{path.stem}.log').open('w', encoding='utf-8') as playerlog:
-                            player = subprocess.Popen(player_args(mpv, not args.quality), stdin=subprocess.PIPE,
-                                                      stdout=playerlog, stderr=subprocess.STDOUT, bufsize=0)
-                            progress = [time.monotonic()]
-                            finished = threading.Event()
-                            # A stalled decoder must not leave Python blocked writing forever.
-                            def watchdog(proc):
-                                while not finished.wait(1):
-                                    if time.monotonic() - progress[0] > 8:
-                                        print('Reproductor sin progreso durante 8 s; cerrando para recuperar USB.')
-                                        stop_process(proc)
-                                        return
-                            threading.Thread(target=watchdog, args=(player,), daemon=True).start()
-                            # Close the socket promptly if the user closes mpv.
-                            def watch(proc, connection):
-                                proc.wait()
-                                try:
-                                    connection.shutdown(socket.SHUT_RDWR)
-                                except OSError:
-                                    pass
-                            threading.Thread(target=watch, args=(player, sock), daemon=True).start()
-                            while True:
-                                seq, source_us, enc_us, payload, details = frame
-                                for key, value in {"encoder_us": enc_us, **details}.items():
-                                    if key.endswith("_us"):
-                                        maxima[key] = max(maxima.get(key, 0), value)
-                                now = time.monotonic_ns()
-                                gap = max(0, seq - last - 1) if last is not None else 0
-                                last = seq
-                                skipped += gap
-                                view = memoryview(payload)
-                                while view:
-                                    written = player.stdin.write(view)
-                                    if not written:
-                                        raise BrokenPipeError('mpv pipe closed')
-                                    view = view[written:]
-                                    progress[0] = time.monotonic()
-                                sock.sendall(b'A')
-                                log.writerow([session, now, seq, source_us, enc_us, len(payload), gap,
-                                              *(details.get(key, "") for key in DIAGNOSTIC_FIELDS)])
-                                count += 1
-                                elapsed = time.monotonic() - start
-                                if elapsed >= 1:
-                                    print(f'FPS RX {count / elapsed:.1f} | encoder máx {maxima["encoder_us"] / 1000:.1f} ms | '
-                                          f'omitidos origen {skipped} | retraso total: sin medir')
-                                    if details:
-                                        state = {0: 'app', 1: 'inactiva/barra', 2: 'fondo'}.get(details['app_state'], '?')
-                                        thermal = {0: 'normal', 1: 'moderado', 2: 'alto', 3: 'crítico'}.get(details['thermal_state'], '?')
-                                        print(f'  {state} | térmico {thermal} | máximos ventana ms: '
-                                              f'cola {maxima["queue_us"]/1000:.1f} · '
-                                              f'imagen {maxima["prepare_us"]/1000:.1f} · '
-                                              f'callback {maxima["callback_queue_us"]/1000:.1f} · '
-                                              f'USB+ACK previo {maxima["previous_ack_us"]/1000:.1f} · '
-                                              f'trabajo iPhone {maxima["source_work_us"]/1000:.1f}')
-                                    output.flush(); count = 0; maxima.clear(); start = time.monotonic()
-                                frame = read_frame_details(sock)
+                        # Preserve the same decoder/window when USB pauses or reconnects.
+                        frame = receive_frame(sock, player)
+                        player.start()
+                        while True:
+                            seq, source_us, enc_us, payload, details = frame
+                            for key, value in {"encoder_us": enc_us, **details}.items():
+                                if key.endswith("_us"):
+                                    maxima[key] = max(maxima.get(key, 0), value)
+                            now = time.monotonic_ns()
+                            gap = max(0, seq - last - 1) if last is not None else 0
+                            last = seq
+                            skipped += gap
+                            player.write(payload)
+                            sock.sendall(b'A')
+                            log.writerow([session, now, seq, source_us, enc_us, len(payload), gap,
+                                          *(details.get(key, "") for key in DIAGNOSTIC_FIELDS)])
+                            count += 1
+                            elapsed = time.monotonic() - start
+                            if elapsed >= 1:
+                                print(f'FPS RX {count / elapsed:.1f} | encoder máx {maxima["encoder_us"] / 1000:.1f} ms | '
+                                      f'omitidos origen {skipped} | retraso total: sin medir')
+                                if details:
+                                    state = {0: 'app', 1: 'inactiva/barra', 2: 'fondo'}.get(details['app_state'], '?')
+                                    thermal = {0: 'normal', 1: 'moderado', 2: 'alto', 3: 'crítico'}.get(details['thermal_state'], '?')
+                                    print(f'  {state} | térmico {thermal} | máximos ventana ms: '
+                                          f'cola {maxima["queue_us"]/1000:.1f} · '
+                                          f'imagen {maxima["prepare_us"]/1000:.1f} · '
+                                          f'callback {maxima["callback_queue_us"]/1000:.1f} · '
+                                          f'USB+ACK previo {maxima["previous_ack_us"]/1000:.1f} · '
+                                          f'trabajo iPhone {maxima["source_work_us"]/1000:.1f}')
+                                output.flush(); count = 0; maxima.clear(); start = time.monotonic()
+                            frame = receive_frame(sock, player)
+                except PlayerClosed as error:
+                    print(error)
+                    return
                 except (OSError, EOFError, ValueError) as error:
                     print(f'Esperando iPhone / reconexión: {error}')
-                    if player is not None and player.poll() is not None:
-                        if player.returncode != 0:
-                            print('mpv falló; revisa su registro. No se ocultará con reintentos.')
-                        return
-                finally:
-                    if player is not None:
-                        finished.set()
-                    stop_process(player)
+                    if player.killed_for_stall:
+                        decoder_restarts += 1
+                        player.close()
+                        if decoder_restarts > 3:
+                            print('El reproductor se bloqueó repetidamente. Revisa el registro de mpv.')
+                            return
+                    else:
+                        try:
+                            player.check()
+                        except PlayerClosed as closed:
+                            print(closed); return
                 time.sleep(1)
     finally:
+        player.close()
         stop_process(proxy)
 
 def main():

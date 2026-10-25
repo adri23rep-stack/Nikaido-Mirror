@@ -1,5 +1,5 @@
 import Foundation
-import CoreImage
+import CoreGraphics
 import VideoToolbox
 
 private final class FrameContext {
@@ -23,7 +23,9 @@ final class Pipeline {
     var failed: ((String) -> Void)?
     private var recovery = EncoderRecovery()
     private let transport = Transport()
-    private let context = CIContext(options: [.cacheIntermediates: false])
+    private var thermalPolicy = ThermalPolicy()
+    private var pixelFormat: OSType = 0
+    private var targetFPS = 60
     private let queue = DispatchQueue(label: "mirror.encode", qos: .userInteractive)
     private let lock = NSLock()
     private var busy = false
@@ -40,7 +42,7 @@ final class Pipeline {
     private var generation: UInt64 = 0
     static func micros() -> UInt64 { UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000) }
     func start() {
-        queue.async { self.recovery = EncoderRecovery(); self.previousAckUs = 0 }
+        queue.async { self.recovery = EncoderRecovery(); self.previousAckUs = 0; self.thermalPolicy = ThermalPolicy() }
         lock.lock(); running = true; lock.unlock()
         transport.report = { [weak self] in self?.report?($0) }
         do { try transport.start() } catch { report?("Puerto USB: \(error)") }
@@ -57,18 +59,19 @@ final class Pipeline {
     private func resetEncoder() {
         generation &+= 1
         if let session { VTCompressionSessionInvalidate(session) }
-        session = nil; pool = nil; size = .zero
+        session = nil; pool = nil; size = .zero; pixelFormat = 0
         forceKey = true; lastPTS = -.infinity
     }
     private func encoderFailed(_ error: Error, stage: String) {
         let code = (error as NSError).code
+        let detail = (error as NSError).domain == "Nikaido.PixelScaler" ? " · \(error.localizedDescription)" : ""
         resetEncoder()
         let retry = recovery.retry(now: ProcessInfo.processInfo.systemUptime)
         if retry {
-            report?("Encoder \(stage): \(code) · recuperando sesión (\(recovery.attempts)/3)")
+            report?("Encoder \(stage): \(code)\(detail) · recuperando sesión (\(recovery.attempts)/3)")
         } else {
             lock.lock(); running = false; lock.unlock()
-            failed?("Encoder \(stage): \(code) · recuperación agotada. Pulsa Compartir para reintentar.")
+            failed?("Encoder \(stage): \(code)\(detail) · recuperación agotada. Pulsa Compartir para reintentar.")
         }
         releaseGate()
     }
@@ -92,26 +95,32 @@ final class Pipeline {
             var stage = "configuración"
             let time = CMTimeGetSeconds(pts)
             guard time.isFinite else { self.releaseGate(); return }
-            // Ceiling, not a promise that ScreenCaptureKit provides 60 FPS.
-            if time >= self.lastPTS && time - self.lastPTS < 1.0 / 60.0 - 0.001 {
+            let profile = self.thermalPolicy.target(thermal: ProcessInfo.processInfo.thermalState.rawValue,
+                                                   now: ProcessInfo.processInfo.systemUptime)
+            // Admission ceiling; capture FPS remains controlled by iOS.
+            if time >= self.lastPTS && time - self.lastPTS < 1.0 / Double(profile.fps) - 0.001 {
                 self.releaseGate(); return
             }
             self.lastPTS = time
             do {
                 let w = CVPixelBufferGetWidth(pixel), h = CVPixelBufferGetHeight(pixel)
-                let scale = min(1.0, min(1280.0 / Double(max(w, h)), 720.0 / Double(min(w, h))))
+                let scale = min(1.0, min(Double(profile.longEdge) / Double(max(w, h)), Double(profile.shortEdge) / Double(min(w, h))))
                 let width = max(2, Int(Double(w) * scale) / 2 * 2)
                 let height = max(2, Int(Double(h) * scale) / 2 * 2)
-                if self.size != CGSize(width: width, height: height) {
-                    try self.configure(width: width, height: height)
+                let format = CVPixelBufferGetPixelFormatType(pixel)
+                guard PixelScaler.supports(format) else {
+                    throw NSError(domain: "Nikaido.PixelScaler", code: Int(format),
+                                  userInfo: [NSLocalizedDescriptionKey: "Formato de captura no compatible"])
+                }
+                if self.size != CGSize(width: width, height: height) || self.pixelFormat != format || self.targetFPS != profile.fps {
+                    try self.configure(width: width, height: height, format: format, fps: profile.fps)
                 }
                 guard let session = self.session, let pool = self.pool else { throw self.error(-1) }
                 stage = "preparación de imagen"
                 var target: CVPixelBuffer?
                 try self.check(CVPixelBufferPoolCreatePixelBuffer(nil, pool, &target))
                 guard let target else { throw self.error(-2) }
-                self.context.render(CIImage(cvPixelBuffer: pixel).transformed(by:
-                    CGAffineTransform(scaleX: CGFloat(width) / CGFloat(w), y: CGFloat(height) / CGFloat(h))), to: target)
+                try PixelScaler.resize(pixel, into: target)
                 let frame = FrameContext(sequence: number, capturedAt: receivedAt, generation: self.generation,
                     queuedUs: processingAt - receivedAt, preparedUs: Self.micros() - processingAt,
                     activity: currentActivity)
@@ -131,7 +140,7 @@ final class Pipeline {
     }
     private func check(_ code: OSStatus) throws { if code != noErr { throw error(code) } }
     private func error(_ code: OSStatus) -> NSError { NSError(domain: "Nikaido.VideoToolbox", code: Int(code)) }
-    private func configure(width: Int, height: Int) throws {
+    private func configure(width: Int, height: Int, format: OSType, fps: Int) throws {
         resetEncoder()
         let callback: VTCompressionOutputCallback = { ref, frameRef, status, flags, buffer in
             let callbackAt = Pipeline.micros()
@@ -169,8 +178,8 @@ final class Pipeline {
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue as CFTypeRef),
             (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse as CFTypeRef),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel as CFTypeRef),
-            (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 8_000_000)),
-            (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: 60))
+            (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: fps < 60 ? 4_000_000 : 8_000_000)),
+            (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: fps))
         ] { try check(VTSessionSetProperty(session, key: key, value: value)) }
         // Optional speed hints must not break devices that reject them.
         let speedStatus = VTSessionSetProperty(session,
@@ -182,11 +191,12 @@ final class Pipeline {
         }
         try check(VTCompressionSessionPrepareToEncodeFrames(session))
         let attributes: [CFString: Any] = [kCVPixelBufferWidthKey: width, kCVPixelBufferHeightKey: height,
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferPixelFormatTypeKey: format,
             kCVPixelBufferIOSurfacePropertiesKey: [:]]
         try check(CVPixelBufferPoolCreate(nil, nil, attributes as CFDictionary, &pool))
         size = CGSize(width: width, height: height); forceKey = true
-        report?("H.264 hardware · \(width)×\(height) · \(lowLatency ? "baja latencia" : "modo compatible")")
+        pixelFormat = format; targetFPS = fps
+        report?("CPU escala · \(width)×\(height) / \(fps) FPS · H.264 \(lowLatency ? "baja latencia" : "modo compatible")")
     }
     private func encoded(_ buffer: CMSampleBuffer?, status: OSStatus, flags: VTEncodeInfoFlags, frame: FrameContext, callbackAt: UInt64) {
         guard frame.generation == generation else { return }

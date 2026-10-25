@@ -30,6 +30,10 @@ jobs:
           mkdir -p build
           swiftc ios/Sources/EncoderRecovery.swift tests/encoder_recovery/main.swift -o build/test-recovery
           build/test-recovery
+      - name: Test CPU image scaling and thermal policy
+        run: |
+          swiftc ios/Sources/PixelScaler.swift ios/Sources/ThermalPolicy.swift tests/pixel_scaler/main.swift -o build/test-scaler
+          build/test-scaler
       - name: Generate Xcode project
         run: |
           brew install xcodegen
@@ -46,11 +50,11 @@ jobs:
           mkdir -p build/package/Payload
           cp -R build/ios/Build/Products/Release-iphoneos/NikaidoMirror.app build/package/Payload/
           cd build/package
-          zip -qr ../NikaidoMirror-0.1.3-unsigned.ipa Payload
+          zip -qr ../NikaidoMirror-0.1.4-unsigned.ipa Payload
       - uses: actions/upload-artifact@v4
         with:
           name: NikaidoMirror-iOS-unsigned
-          path: build/NikaidoMirror-0.1.3-unsigned.ipa
+          path: build/NikaidoMirror-0.1.4-unsigned.ipa
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
@@ -76,6 +80,7 @@ jobs:
           Copy-Item README.md dist\README.md
           Copy-Item docs\VALIDATION.md dist\VALIDATION.md
           Copy-Item docs\DEPENDENCIES.md dist\DEPENDENCIES.md
+          Copy-Item docs dist\docs -Recurse
       - uses: actions/upload-artifact@v4
         with:
           name: NikaidoMirror-Windows-x64

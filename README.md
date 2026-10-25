@@ -1,20 +1,21 @@
-# Nikaido Mirror — 0.1.3 USB probe
+# Nikaido Mirror — 0.1.4 USB probe
 
 Proyecto gratuito y abierto (MIT). Primera implementación experimental para
 capturar iPhone → USB → ventana Windows. **No es todavía una versión verificada
 ni una promesa de 60 FPS.** Audio, controles remotos y 1080p no están incluidos.
 
-## Prueba actual: lentitud en segundo plano
+## Prueba actual: congelamientos en segundo plano
 
-El usuario confirmó imagen por USB y recepción cercana a 60 FPS dentro de la
-app. Al abrir notificaciones o salir de ella reportó lentitud y picos de hasta
-399.9 ms en la métrica anterior del encoder. No se ha medido retraso óptico.
+El usuario confirmó vídeo por USB; en 0.1.3 reportó congelamientos, cierre de
+ventana y calor alto. **0.1.4** cambia el escalado de imagen a CPU, reduce la carga
+si iOS marca calor alto y conserva la ventana durante pausas/reconexiones USB.
+Instalar la IPA y reemplazar el EXE; conservar iproxy, mpv y controladores.
 
-**Actualizar IPA y EXE juntos a 0.1.3.** Esta prueba solicita baja latencia en el
-encoder, ajusta prioridad de las colas y añade mediciones por etapa. El EXE nuevo
-acepta las IPA antiguas, pero el EXE antiguo no acepta el protocolo NM02 nuevo.
-Mantener iproxy, mpv y controladores existentes. Ver [diagnóstico y prueba](docs/BACKGROUND.md).
-No se considera corregida la lentitud hasta probar esta versión en el iPhone.
+En calor alto se limita temporalmente a 540p/30 (15 con calor crítico); en estado
+normal el objetivo sigue siendo 720p/60, sujeto a lo que entregue la captura.
+**Pendiente de prueba física: no se declara resuelto el congelamiento.**
+Ver [cambios y validación 0.1.4](docs/STABILITY-0.1.4.md) y
+[definición de las mediciones](docs/BACKGROUND.md).
 
 ## Historial de la primera entrega 0.1.0
 
