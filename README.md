@@ -11,18 +11,24 @@ ni una promesa de 60 FPS.** Audio, controles remotos y 1080p no están incluidos
 - Implementados: app Swift, H.264 VideoToolbox que requiere hardware, servidor
   local, receptor Python/mpv, Gaming por defecto, reconexión, CSV, workflows.
 - Pruebas locales: protocolo fragmentado, desconexión, límites, ACK sobre TCP.
-- **Pendiente**: compilación Xcode/Windows, instalación firmada, USB físico,
+- **Pendiente**: instalación firmada, USB físico,
   continuidad al abrir juegos, orientación, aceleración real del receptor,
   FPS sostenidos y medición óptica de retraso.
-- No se generó IPA ni EXE en este entorno Linux. Los workflows los generan al
-  ejecutarse en GitHub; un YAML preparado no significa una compilación aprobada.
-- El repositorio remoto no pudo crearse: el conector no ofrece esa operación y
-  el navegador no tiene sesión. El ZIP incluye `history.bundle` con commits locales.
+- **Compilación confirmada**: iOS con Xcode 27 e IPA sin firma; Windows x64 con
+  EXE y prueba de arranque `--help`; 8 pruebas del protocolo aprobadas en Linux
+  y Windows. Primera ejecución verificada:
+  https://github.com/adri23rep-stack/Nikaido-Mirror/actions/runs/40167484364
+- Código de esa compilación: `d7de98bca2831c6c580835fe17cff24337b14b01`.
+  Los binarios son sondas de prueba, no una validación de captura física.
+- El código y su historial ya están publicados en este repositorio.
 
 ## Prueba prevista
 
-1. Subir este repositorio a GitHub y revisar que los tres trabajos de Actions
-   terminen correctamente. Descargar ambos artefactos.
+1. Abrir [Actions](https://github.com/adri23rep-stack/Nikaido-Mirror/actions),
+   elegir una ejecución aprobada y descargar los artefactos
+   `NikaidoMirror-iOS-unsigned` y `NikaidoMirror-Windows-x64`.
+   Extraer ambos ZIP. El primero contiene la IPA; el segundo, el EXE.
+   Descargar artefactos de Actions puede requerir iniciar sesión en GitHub.
 2. Firmar e instalar la IPA en el iPhone mediante un método de instalación válido.
    La IPA de CI no está firmada y no se instala por sí sola. La continuidad en
    segundo plano debe probarse instalada normalmente; no se garantiza en contenedores.
@@ -57,20 +63,15 @@ El ACK confirma escritura al pipe de mpv, no presentación en el monitor.
 [Prueba física y medición](docs/VALIDATION.md) · [Etapas](docs/ROADMAP.md) ·
 [Fuentes y decisiones](docs/RESEARCH.md) · [Protocolo](docs/PROTOCOL.md)
 
-## Subir a GitHub conservando commits
-
-Crear un repositorio vacío llamado `Nikaido-Mirror` (sin README inicial).
-Extraer el ZIP y, desde la carpeta que contiene history.bundle:
+## Continuar desde GitHub
 
 ```sh
-git clone history.bundle Nikaido-Mirror-git
-cd Nikaido-Mirror-git
-git remote set-url origin https://github.com/adri23rep-stack/Nikaido-Mirror.git
-git push -u origin main
+git clone https://github.com/adri23rep-stack/Nikaido-Mirror.git
+cd Nikaido-Mirror
 ```
 
-Esto requiere iniciar sesión en GitHub desde tu equipo. También puedes dar el
-enlace del repositorio vacío a la siguiente sesión para continuar desde él.
+Los archivos `history.bundle` de la entrega inicial son una copia del historial
+local anterior a la publicación. Para nuevos cambios, usar este repositorio.
 
 ## Desarrollo
 
@@ -78,3 +79,4 @@ Pruebas: `python -m unittest discover -s tests -v`.
 Receptor desde código: `python windows/mirror.py` (requiere mpv/iproxy).
 App: `cd ios && xcodegen generate`; abrir proyecto con Xcode 27.
 Se usa Swift 5 para no asumir aislamiento Swift 6 en callbacks del SDK nuevo.
+
